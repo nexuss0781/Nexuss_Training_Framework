@@ -1,62 +1,47 @@
 ---
 name: ntf-adapter
-description: Adapt the Nexus Training Framework's 19-worker/1-coordinator GitHub Actions pattern to an existing software, data, or ML workflow. Use when asked to install, customize, debug, or extend this NTF starter in a project.
+description: Adapt the Nexus Training Framework's 19-worker iterative FedAvg workflow, dataset manifest, object-storage coordination, and validation checks. Use when asked to install, customize, debug, or extend this NTF starter in a project.
 ---
 
 # NTF Adapter Skill
 
-You are adapting an existing project's workflow to the Nexus Training Framework (NTF), a GitHub Actions **fan-out/fan-in** starter. Preserve the core shape—19 matrix workers and one coordinator—unless the user explicitly asks to change the shard count. Never claim that unrelated independently trained model weights can be merged generically.
+NTF is a manual-only 19-worker iterative federated-averaging training scaffold. Preserve exactly 19 shard workers and one coordinator unless the user explicitly requests another topology. The coordinator is separate from the worker matrix. Do not claim that arbitrary independent model runs can be merged.
 
 ## First inspect
 
-1. Inspect the target repository's language, build/test commands, current workflows, data format, secrets policy, and existing artifact conventions before editing.
-2. Read the NTF `README.md`, `docs/adapting.md`, `.github/workflows/ntf.yml`, and worker/reducer scripts.
-3. Identify what work can be split into independent, deterministic shards and what the correct final operation is. If there is no valid decomposition or reducer, explain the limitation rather than inventing one.
-4. Preserve unrelated user changes. Do not overwrite an existing workflow; merge the pattern into it or add a clearly named workflow.
+1. Inspect repository language, branch/worktree status, workflows, data contract, secrets policy, storage, and test commands.
+2. Read the root README, `docs/adapting.md`, `.github/workflows/ntf.yml`, `training/fedavg/config.json`, and FedAvg scripts.
+3. Confirm whether the task is only code preparation or explicitly authorizes a training run. Never start a training run merely to test code; synthetic tensors and fixture data are sufficient for unit tests.
+4. Preserve unrelated branches, tags, work, model artifacts, and user changes.
 
-## Adaptation contract
+## FedAvg invariants
 
-Keep these responsibilities distinct:
+- Every round begins with all 19 workers loading the identical published global checkpoint and verifying its checksum and run/config/architecture/manifest identity.
+- Every worker consumes only one assigned dataset shard. The training architecture and effective configuration are identical across shards; only data assignment and deterministic per-shard/per-round random seed differ.
+- The coordinator must fail closed on failed/missing/duplicate workers, incomplete metadata, inconsistent parent checkpoint, manifest/config mismatch, tensor key/shape/dtype mismatch, non-finite values, or invalid sample counts.
+- Aggregate model tensors using sample-count-weighted FedAvg, `sum(n_i * local_weights_i) / sum(n_i)`, where `n_i` is the actual number of local sequence examples processed for that update. Do not average optimizer state; this implementation resets each local optimizer per round.
+- Publish the next global checkpoint only after all 19 compatible updates succeed. Workers must wait for it before starting the next round. Never average diverged full-training runs or independent initializations.
+- Checkpoint/state format, model architecture, tokenization, data manifest, deterministic configuration, and software pins are part of the compatibility identity. Require new tests for changes.
 
-- **Partition:** Given a run/input identity and shard IDs `0..18`, assign every intended work item exactly once (unless purposeful replication is part of the algorithm). Prefer a stable manifest of shard-specific files/objects for large inputs.
-- **Worker:** Consume only its assigned work; be idempotent where possible; write a versioned output with the shard ID, input identity/checksum, and enough metadata to verify it.
-- **Monitor:** Keep one coordinator job that tracks the 19 named worker jobs for the current workflow run. If job names change, update the monitor's matching rule and tests together. Its token should have only `actions: read` plus the minimum other permissions needed.
-- **Artifact handoff:** Use unique, predictable artifact names per shard. GitHub-hosted jobs do not share a workspace. Avoid uploading secrets or unnecessarily large intermediates.
-- **Reducer:** Validate result count, unique shard IDs, schemas, common input identity, and worker success before applying a domain-specific deterministic reducer. Preserve provenance in the final artifact.
+## Data and storage contract
 
-## ML and aggregation gate
+- Source JSONL records require unique IDs and non-empty text. Use `scripts/prepare_shards.py` to partition by a stable 19-way ID hash and generate manifest provenance plus per-shard/source checksums. It rejects duplicate source IDs and empty shards.
+- Keep data outside Git. Review licensing, privacy, source revision, and retention before uploading the shard files and manifest to private object storage.
+- Workers validate exact manifest coverage, per-shard SHA-256 and record count; the coordinator checks data/config/architecture digests across every update. The manifest is trusted as the immutable statement of the partition produced by the preparation tool; the coordinator does not re-download all workers' raw data.
+- Actions jobs have isolated filesystems. Use the documented S3 barrier for intermediate round state; ordinary artifacts cannot provide a live round-by-round synchronization channel. Restrict OIDC role permissions to required dataset/run prefixes and configure lifecycle retention.
 
-Before implementing model-weight aggregation, verify and document all of the following with project-specific evidence:
+## Runner/Actions boundary
 
-- identical model architecture and tensor names/shapes;
-- the same agreed initial checkpoint/version and compatible tokenization/configuration;
-- a named aggregation/training algorithm (for example, a properly specified federated averaging round), including the weighting and optimizer-state policy;
-- validation that checks model quality, numerical integrity, and provenance.
+- Standard GitHub-hosted runner labels such as `ubuntu-latest` are CPU-only. Production config requires CUDA and fails closed without it. Configure 19 compatible GPU-capable workers; do not imply a standard hosted runner provides GPUs.
+- Configure `worker_runner_json` and `coordinator_runner_json` with valid JSON arrays of runner labels. Runner labels do not reserve availability; account concurrency may queue jobs.
+- Keep Actions token permissions least-privilege: workers need source read and S3 role access; coordinator needs Actions read, source read, and S3 role access; no repository-content write permission is necessary.
+- Keep workflow triggers manual-only unless the user explicitly requests automatic training. Document execution time, storage/transfer cost, data privacy, and current runner/account limits.
 
-A shared architecture by itself does **not** make checkpoints mergeable. Do not average arbitrary checkpoints, do not call independent weight averaging "frontier model training," and do not publish/deploy aggregated weights without explicit validation. Ordinary independent GitHub Actions jobs do not provide synchronized distributed gradients or guaranteed GPUs/inter-worker networking. For a non-ML workflow, reduce its actual outputs instead (counts, test reports, candidate rankings, or assembled files).
+## Work procedure and validation
 
-## GitHub Actions constraints to preserve
-
-- The sample matrix has exactly 19 shards and `max-parallel: 19`; the coordinator is a twentieth job, not an extra worker.
-- Concurrency is a ceiling subject to plan/account/repository limits and other active workflows, not a reservation.
-- Hosted-runner hardware depends on repository visibility and runner label. The common 4 CPU / 16 GB / 14 GB Linux spec applies to standard public-repository runners in current documentation; private standard runners may have fewer resources.
-- Each hosted job has a six-hour maximum. Budget for setup, data transfer, work, polling, and reduction.
-- Jobs are isolated. Large data should be partitioned and fetched efficiently; downloading the same 1 GB input in all 19 jobs multiplies transfer volume.
-- Review API permissions, secret exposure, billing/minutes, artifact retention, and data license/privacy before enabling production runs.
-
-## Work procedure
-
-1. Propose the smallest safe project-specific change; list files and any behavior that would change.
-2. Implement the partition/data adapter, worker, result schema, and reducer. Keep the orchestration contract stable.
-3. Update workflow paths, runtime/dependencies, environment variables, artifact names, and monitor matching only as needed. Keep shard count 19 unless authorized otherwise.
-4. Add tests for exact coverage/no duplicates, missing shards, malformed outputs, common input identity, and reduction correctness. Add tests for monitor job-name matching whenever it changes.
-5. Run local unit tests and a small local end-to-end run. Validate workflow YAML and actions syntax as far as available; state clearly if a real GitHub run was not performed.
-6. Summarize changed files, tests, required GitHub secrets/settings, data/cost implications, and any unresolved production validation.
-
-## Safe defaults
-
-- Do not broaden workflow triggers or publish/deploy results without explicit user intent.
-- Use least-privilege token permissions and never print tokens or secrets.
-- Use idempotent shard outputs and fail loudly on missing/duplicate workers.
-- Do not assume current GitHub plan limits are permanent; link to official docs.
-- If the requested task needs GPUs, multi-node collectives, >6-hour jobs, shared high-throughput storage, or an invalid model merge, explain the mismatch and suggest a suitable training platform/protocol rather than disguising Actions as a cluster.
+1. Make the smallest project-specific change while retaining the algorithm invariants.
+2. Add or update tests for 19-way coverage, unique IDs, manifest provenance, deterministic config, common checkpoint, weighted math, tensor compatibility, missing/failed workers, and write-once checkpoint behavior.
+3. Run `python3 -m unittest discover -s tests -v`. Tests must not launch model training or a GitHub workflow unless the user explicitly authorized a non-production run.
+4. Validate workflow YAML and static Python compilation. State clearly whether an actual Actions run/training occurred.
+5. Keep output checkpoints and release tags unpublished unless the user has approved the exact external release action.
+6. For a release candidate, provide the exact proposed title, tag, target branch, notes payload, and commit. Do not publish the tag/release before confirmation.

@@ -1,95 +1,180 @@
-name: NTF 19-worker demo
+name: NTF production-oriented FedAvg (manual)
 
 on:
   workflow_dispatch:
+    inputs:
+      rounds:
+        description: "Number of global FedAvg rounds"
+        type: string
+        required: true
+        default: "10"
+      local_steps:
+        description: "Maximum local optimizer steps per worker per round"
+        type: string
+        required: true
+        default: "100"
+      worker_runner_json:
+        description: 'JSON runner labels, e.g. ["self-hosted","linux","x64","gpu"]'
+        type: string
+        required: true
+      coordinator_runner_json:
+        description: 'JSON runner labels for initializer/coordinator, e.g. ["ubuntu-latest"]'
+        type: string
+        required: true
+      aws_region:
+        description: "AWS region containing the configured S3 bucket"
+        type: string
+        required: true
+        default: "us-east-1"
+      s3_bucket:
+        description: "S3 bucket for dataset shards and round-by-round checkpoints"
+        type: string
+        required: true
+      s3_prefix:
+        description: "Run output prefix within the bucket"
+        type: string
+        required: true
+        default: "ntf"
+      manifest_key:
+        description: "S3 object key for the immutable 19-shard dataset manifest"
+        type: string
+        required: true
+      round_timeout_seconds:
+        description: "Maximum wait for each round's 19 updates and final worker completion"
+        type: string
+        required: true
+        default: "1200"
 
 permissions: {}
 
 jobs:
-  worker:
-    name: NTF worker shard ${{ matrix.shard }}
-    runs-on: ubuntu-latest
+  initialize:
+    name: NTF initialize common global checkpoint
+    runs-on: ${{ fromJSON(inputs.coordinator_runner_json) }}
     timeout-minutes: 360
     permissions:
       contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r training/fedavg/requirements.txt
+      - name: Assume the S3-scoped run role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ inputs.aws_region }}
+      - name: Initialize run and common round-0 checkpoint
+        env:
+          STORAGE_URI: s3://${{ inputs.s3_bucket }}/${{ inputs.s3_prefix }}/runs/ntf-${{ github.run_id }}-${{ github.run_attempt }}
+          MANIFEST_KEY: ${{ inputs.manifest_key }}
+          ROUNDS: ${{ inputs.rounds }}
+          LOCAL_STEPS: ${{ inputs.local_steps }}
+          RUN_ID: ntf-${{ github.run_id }}-${{ github.run_attempt }}
+        run: >-
+          python scripts/fedavg_init.py
+          --storage-uri "$STORAGE_URI"
+          --manifest-key "$MANIFEST_KEY"
+          --rounds "$ROUNDS"
+          --local-steps "$LOCAL_STEPS"
+          --run-id "$RUN_ID"
+
+  worker:
+    name: NTF FedAvg worker shard ${{ matrix.shard }}
+    needs: initialize
+    runs-on: ${{ fromJSON(inputs.worker_runner_json) }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       max-parallel: 19
       matrix:
-        shard: ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18']
+        shard: ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18"]
     steps:
       - name: Check out source
         uses: actions/checkout@v6
-
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
-
-      - name: Process this shard
-        run: >-
-          python scripts/demo_worker.py
-          --shard "${{ matrix.shard }}"
-          --shards 19
-          --input data/demo.jsonl
-          --output-dir "out/shard-${{ matrix.shard }}"
-
-      - name: Upload this shard result
-        uses: actions/upload-artifact@v4
+          python-version: "3.12"
+      - name: Install pinned training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r training/fedavg/requirements.txt
+      - name: Assume the S3-scoped run role
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          name: ntf-shard-${{ matrix.shard }}
-          path: out/shard-${{ matrix.shard }}/result.json
-          if-no-files-found: error
-          retention-days: 1
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ inputs.aws_region }}
+      - name: Train only this shard through all FedAvg rounds
+        env:
+          STORAGE_URI: s3://${{ inputs.s3_bucket }}/${{ inputs.s3_prefix }}/runs/ntf-${{ github.run_id }}-${{ github.run_attempt }}
+          MANIFEST_KEY: ${{ inputs.manifest_key }}
+          ROUNDS: ${{ inputs.rounds }}
+          LOCAL_STEPS: ${{ inputs.local_steps }}
+          SHARD_ID: ${{ matrix.shard }}
+          RUN_ID: ntf-${{ github.run_id }}-${{ github.run_attempt }}
+        run: >-
+          python scripts/fedavg_worker.py
+          --storage-uri "$STORAGE_URI"
+          --manifest-key "$MANIFEST_KEY"
+          --shard "$SHARD_ID"
+          --rounds "$ROUNDS"
+          --local-steps "$LOCAL_STEPS"
+          --run-id "$RUN_ID"
 
   coordinator:
-    name: NTF coordinator / live monitor + reducer
-    runs-on: ubuntu-latest
+    name: NTF FedAvg coordinator
+    needs: initialize
+    runs-on: ${{ fromJSON(inputs.coordinator_runner_json) }}
     timeout-minutes: 360
     permissions:
       actions: read
       contents: read
+      id-token: write
     steps:
       - name: Check out source
         uses: actions/checkout@v6
-
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
-
-      - name: Monitor all 19 worker jobs
+          python-version: "3.12"
+      - name: Install pinned training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r training/fedavg/requirements.txt
+      - name: Assume the S3-scoped run role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ inputs.aws_region }}
+      - name: Validate worker jobs, aggregate each round, and publish the next checkpoint
         env:
+          STORAGE_URI: s3://${{ inputs.s3_bucket }}/${{ inputs.s3_prefix }}/runs/ntf-${{ github.run_id }}-${{ github.run_attempt }}
+          MANIFEST_KEY: ${{ inputs.manifest_key }}
+          ROUNDS: ${{ inputs.rounds }}
+          LOCAL_STEPS: ${{ inputs.local_steps }}
+          POLL_SECONDS: "20"
+          ROUND_TIMEOUT_SECONDS: ${{ inputs.round_timeout_seconds }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_API_URL: ${{ github.api_url }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: >-
-          python scripts/monitor.py
-          --expected-shards 19
-          --poll-seconds 60
-          --timeout-seconds 20400
-
-      - name: Download worker artifacts
-        if: success()
-        uses: actions/download-artifact@v5
-        with:
-          path: artifacts
-
-      - name: Reduce worker results
-        if: success()
-        run: >-
-          python scripts/reduce.py
-          --input-dir artifacts
-          --expected-shards 19
-          --output out/aggregate/summary.json
-
-      - name: Upload combined result
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ntf-final-report
-          path: out/aggregate/summary.json
-          if-no-files-found: error
-          retention-days: 7
+          python scripts/fedavg_coordinator.py
+          --storage-uri "$STORAGE_URI"
+          --manifest-key "$MANIFEST_KEY"
+          --rounds "$ROUNDS"
+          --local-steps "$LOCAL_STEPS"
+          --poll-seconds "$POLL_SECONDS"
+          --timeout-seconds "$ROUND_TIMEOUT_SECONDS"

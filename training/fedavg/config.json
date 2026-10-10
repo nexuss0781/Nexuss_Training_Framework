@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "worker_count": 19,
+  "rounds": 10,
+  "local_steps": 100,
+  "batch_size": 8,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.01,
+  "max_sequence_length": 256,
+  "seed": 20261011,
+  "require_cuda": true,
+  "deterministic_algorithms": true,
+  "model": {
+    "name": "ntf-byte-gpt-14m-v1",
+    "vocab_size": 256,
+    "d_model": 448,
+    "n_heads": 7,
+    "n_layers": 6,
+    "max_sequence_length": 256,
+    "dropout": 0.0
+  }
+}

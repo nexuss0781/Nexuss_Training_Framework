@@ -1,107 +1,122 @@
 # Nexus Training Framework (NTF)
 
-**A reusable GitHub Actions fan-out/fan-in starter:** 19 independent workers and one coordinator, with a live run monitor and a domain-specific reducer.
+**Version 2.0.0 candidate — iterative 19-worker federated training scaffold.** NTF now provides a real, explicitly dispatched FedAvg training path: all workers share one Transformer architecture and each receives a different, checksummed data shard.
 
-NTF is a framework pattern, not a claim that GitHub Actions is a GPU cluster or that arbitrary model weights can be merged. The included demo shards a tiny JSONL file, counts words on 19 workers, waits for all worker jobs through GitHub's Actions API, downloads their artifacts, and sums the results.
+> **This repository contains training code and a reference configuration, not a trained or validated model.** No dataset is included, no training is launched by default, and the 14M-scale configuration is not a frontier model. Evaluate data rights, model quality, security, cost, and hardware before any production use.
 
-## The 19–1 idea
+## Protocol: one common checkpoint, one validated round at a time
 
 ```mermaid
 flowchart LR
-    D[Input dataset / task] --> W[19 matrix workers<br/>shard 00–18]
-    W -->|one artifact per worker| C[One coordinator job<br/>poll → collect → reduce]
-    C --> O[One combined result artifact]
+    D[Immutable dataset manifest<br/>19 disjoint shards] --> I[Initialize one global checkpoint]
+    I --> W[19 GPU-capable worker jobs<br/>one shard each]
+    W -->|local weights + sample count + provenance| C[Coordinator validates all 19 updates]
+    C --> A[Sample-count-weighted FedAvg]
+    A --> G[Publish global checkpoint r+1]
+    G --> W
+    A --> F[After final round: final.json + checkpoint]
 ```
 
-- **Workers:** one matrix job for each shard ID `00` through `18`. `fail-fast: false` lets every shard finish even if one fails.
-- **Coordinator:** one separate job starts alongside the matrix when runner capacity permits. It polls the current workflow run, waits for all 19 named workers to finish, then downloads and reduces their artifacts.
-- **Concurrency:** `max-parallel: 19` caps the worker matrix. With an available 20-job account limit, 19 workers plus the coordinator can occupy 20 runner slots; Actions may queue jobs when the repository/account is at its limit or another workflow is using capacity.
-- **Data handoff:** GitHub-hosted jobs have separate ephemeral workspaces. Workers do not share a disk; outputs are uploaded and later downloaded as workflow artifacts.
+For every round `r`:
 
-The coordinator is a **job that monitors worker job states**, not a permanent service. The sample uses `GITHUB_TOKEN` with read-only Actions permission and polls once per minute. If you do not need live polling, a simpler coordinator with `needs: worker` can start after the matrix finishes; this starter deliberately demonstrates the 19-worker/1-monitor shape.
+1. All 19 workers load the **same** immutable global checkpoint `r` and verify its checksum, architecture, configuration, and manifest digest.
+2. Each worker trains only its assigned data shard, using the same architecture, optimizer settings, and configured local-step budget. It reports the number of training sequences actually processed.
+3. The coordinator waits for all 19 worker updates, rejects missing/duplicate/failed workers or incompatible metadata/tensors, and computes
+   `global[r+1] = sum(n_i * local_weights_i) / sum(n_i)`.
+4. It publishes the next checkpoint and only then can workers begin round `r+1`. Each worker creates a fresh local AdamW optimizer each round; optimizer state is not averaged.
 
-## Quick start
+This is **iterative federated averaging**, not naive averaging of independent full runs and not synchronized DDP/FSDP training. Every local update in a round must descend from the same global checkpoint. The coordinator validates exact tensor keys, shapes, floating dtypes, finite values, common parent checkpoint, config and data provenance, positive sample counts, and complete shard coverage.
 
-1. Copy this repository into your project or download/unzip the archive.
-2. Commit the files to a GitHub repository. Enable Actions if it is disabled.
-3. Open **Actions → NTF 19-worker demo → Run workflow**. The sample is manual-triggered to avoid unexpectedly starting 20 jobs on every push.
-4. Open the run. The **NTF coordinator / live monitor + reducer** job reports worker progress. On success, download `ntf-final-report` and inspect `summary.json`.
-5. Read [`skills/ntf-adapter/SKILL.md`](skills/ntf-adapter/SKILL.md) and [`docs/adapting.md`](docs/adapting.md) before adapting it.
+## Architecture and reference configuration
 
-No third-party service, paid credential, or dependency is needed for the toy demo. The Python scripts use only the standard library.
+- **Model:** `ntf-byte-gpt-14m-v1`, a decoder-only causal Transformer with byte-level UTF-8 token IDs, 6 layers, width 448, 7 attention heads, 256-token context, and approximately 14–15 million parameters.
+- **Shared across workers:** model configuration, initialization, round count, local-step budget, optimizer settings, seed policy, software pins, and dataset-manifest digest. Only the assigned data shard and its deterministic worker/round seed differ.
+- **Reference defaults:** 10 global rounds, up to 100 local optimizer steps per round, batch size 8. Change `training/fedavg/config.json` and workflow inputs to fit the corpus and hardware. More steps/rounds increase compute and storage; they are not a quality guarantee.
+- **Determinism:** canonical config/manifest hashes and per-shard/per-round seeds are checked and recorded. Deterministic Torch algorithms are enabled; bitwise-identical outcomes across different GPU models, drivers, or kernel stacks are not promised. Keep worker software and accelerator environments aligned.
+- **Checkpoint policy:** every run has a unique run prefix; round checkpoints and update artifacts are write-once, checksum-verified, and include parent/config/manifest/architecture metadata. Failed or incomplete rounds are not aggregated.
 
-## Adapt it to another workflow
+The FedAvg training implementation is the PyTorch engine in `training/fedavg/`; the older `training/litgpt/` folder remains only as a separate legacy smoke example and is not called by the production-oriented workflow.
 
-The reusable boundary is intentionally small:
+## Hardware and 19 isolated runners
 
-1. **Partition:** choose a stable shard assignment in your worker or data adapter. Every work item must be assigned exactly once (or intentionally replicated).
-2. **Worker:** replace `scripts/demo_worker.py` with your project command. It receives a shard ID and total shard count and writes a small, versioned result under `out/`.
-3. **Artifact:** retain one uniquely named artifact per shard, or change the upload/download strategy if outputs are large.
-4. **Reducer:** replace `scripts/reduce.py` with the correct, deterministic domain operation: combine metrics, concatenate independent outputs, select the best candidate, or run an explicitly justified ML aggregation algorithm.
-5. **Validate:** test missing, duplicate, malformed, and failed shard outputs before using results downstream.
+The workflow is manual-only (`workflow_dispatch`). There is no push, schedule, or automatic training trigger.
 
-The demo uses round-robin JSONL **records** (`line_number % 19`), which is balanced by record count only. It reads the small checked-in demo file on every worker. For a large dataset, don't copy that behavior blindly: put the data in suitable storage and make each worker retrieve only its assigned shard or partition, preferably from a precomputed manifest/object layout. NTF does not upload or split a 1 GB dataset for you.
+- Standard GitHub-hosted runner labels such as `ubuntu-latest` are **CPU-only**. The checked-in production config has `require_cuda: true`, so a CPU worker fails closed rather than silently starting a slow run. Set `worker_runner_json` to labels for 19 compatible GPU runners (for example `["self-hosted", "linux", "x64", "gpu"]`) or use a supported GPU runner offering. Confirm CUDA, driver, memory, disk, and installed PyTorch wheel compatibility on every worker.
+- `coordinator_runner_json` is independently configurable; the coordinator can normally run on CPU. Runner labels select an eligible machine; they do not reserve capacity. Configure sufficient concurrency for **19 workers plus the coordinator and initializer**, accounting for other jobs and queued work.
+- GitHub Actions jobs are isolated ephemeral environments. They do not share a local filesystem or GPU memory. NTF uses a private AWS S3 bucket for **round-by-round synchronization**: worker checkpoints/metadata are uploaded, the coordinator aggregates and publishes a new global checkpoint, and workers poll for it. GitHub artifacts alone arrive too late for this iterative barrier.
+- Training can exceed hosted-runner time limits; each workflow job here has a six-hour timeout. For longer production runs, configure suitable self-hosted/hosted larger runners and tune limits accordingly. Review current platform, service, account concurrency, and billing policies before running.
+- 19 workers do not become a multi-GPU collective. This design incurs checkpoint/data transfer and storage overhead. For workloads that need synchronized gradients, use a purpose-built DDP/FSDP or distributed training platform instead.
 
-## Model-training truth-in-advertising
+## Prepare data with provenance
 
-The included reducer merges **word-count maps**, not model weights. Two independently trained checkpoints are not automatically compatible merely because they have the same filename or architecture. A valid model aggregator needs, at minimum, compatible tensor names/shapes, the same agreed initialization/protocol, and an algorithm whose assumptions fit the training procedure and data. Federated averaging is one possible protocol for compatible local updates; it is not a universal merge operation. Many frontier-model training methods require synchronized gradients, specialized accelerators, high-bandwidth communication, large storage, and continuous multi-node coordination that ordinary ephemeral Actions runners do not provide.
+The source corpus must be UTF-8 JSONL with unique `id` and non-empty `text` fields. Keep private/licensed corpora out of Git. The preparation tool partitions by the stable rule `SHA256(record_id) mod 19`, rejects duplicate IDs, proves every source row is written once, and emits checksums and provenance:
 
-Treat this repository as a **general-purpose embarrassingly-parallel workflow scaffold**. For ML, use it only for work that is truly shardable (for example, preprocessing, evaluation, hyperparameter trials, or explicitly designed federated rounds) and implement/review the model-specific protocol separately. Do not publish or deploy aggregated weights without validating quality and provenance.
-
-## LitGPT from-scratch training scaffold
-
-The [`training/litgpt/`](training/litgpt/) subtree is an optional, explicitly invoked trainer based on [Lightning AI LitGPT](https://github.com/Lightning-AI/litgpt) (Apache-2.0). It uses the Pythia-14M architecture with randomly initialized weights and a tokenizer-only download; its checked-in data and 256-token budget are a tiny smoke example, not a useful language model. Read its setup and data guidance before starting a real run.
-
-This trainer is **not** wired into GitHub Actions. The 19 independent matrix workers do not exchange synchronized gradients and cannot substitute for DDP/FSDP or a coordinated multi-node training system. Standard GitHub-hosted runners are resource/plan-limited; GPU/larger runners are separate, concurrency may queue, and each hosted job has a six-hour cap. See the [LitGPT trainer notes](training/litgpt/README.md) before choosing an actual training platform.
-
-## GitHub Actions realities
-
-These figures are not a promise of identical resources for every account or runner image:
-
-- Current GitHub documentation lists **4 CPU / 16 GB RAM / 14 GB SSD** for standard Linux runners in **public** repositories; standard Linux runners for **private** repositories are listed as **2 CPU / 8 GB RAM / 14 GB SSD**. Larger/GPU runners are separate and plan-dependent.
-- The documented standard hosted-job concurrency limit is plan-dependent. The current limits table lists 20 concurrent standard jobs for Free, 40 for Pro, 60 for Team, and higher limits for Enterprise; other workflows and account/organization policy also consume capacity. `max-parallel` is a ceiling, not a reservation.
-- Each GitHub-hosted job can run for up to **6 hours**. The sample uses the normal 6-hour job timeout and the monitor gives itself a little margin; change that only with a deliberate runtime budget.
-- Matrix jobs use separate VMs/workspaces. Artifacts are the data handoff, and large artifacts/datasets incur transfer time and storage/bandwidth costs. A 1 GB input downloaded by all 19 workers can mean roughly 19 GB of runner downloads, before output artifacts.
-- Private repositories use included Actions minutes and then may incur charges. Check current usage and billing for your plan before increasing job count or runtime.
-
-Check GitHub's latest limits and runner pages before relying on any capacity assumptions; they can change. Links are in [References](#references).
-
-## Repository map
-
-```text
-.github/workflows/ntf.yml       19-worker + one live coordinator workflow
-scripts/monitor.py              read-only polling of this run's worker jobs
-scripts/demo_worker.py          tiny JSONL round-robin worker example
-scripts/reduce.py               deterministic sum/reducer example
-skills/ntf-adapter/SKILL.md     instructions for an AI agent adapting NTF
- docs/adapting.md                practical adaptation checklist
- tests/test_framework.py         offline unit tests
+```bash
+python3 scripts/prepare_shards.py \
+  --input /secure/path/corpus.jsonl \
+  --output-dir /secure/path/ntf-dataset \
+  --dataset-id approved-corpus \
+  --revision immutable-dataset-revision \
+  --source 'internal registry record or source URL' \
+  --license 'documented license/permission' \
+  --object-prefix datasets/approved-corpus/revision-001
 ```
 
-## Local test
+Review `manifest.json`, then upload its 19 shard files and manifest to the private S3 bucket, preserving the keys:
+
+```bash
+aws s3 cp /secure/path/ntf-dataset/shards/ s3://YOUR_BUCKET/datasets/approved-corpus/revision-001/shards/ --recursive
+aws s3 cp /secure/path/ntf-dataset/manifest.json s3://YOUR_BUCKET/datasets/approved-corpus/revision-001/manifest.json
+```
+
+The worker downloads only its own shard and verifies its SHA-256 and record count. The coordinator checks that the manifest has exactly shard IDs `00`–`18`, unique object keys, required dataset source/revision/license metadata, a valid overall source digest, and matching record totals. The preparation tool is the trusted partitioning step that detects duplicate IDs across the full input; preserve the generated manifest with the dataset. The FedAvg weight `n_i` is each worker's actual number of sequence examples processed in that round, not its raw JSONL record count.
+
+## Configure and dispatch
+
+1. Create a private S3 bucket (or compatible object store adapter), enable encryption/versioning, and set an expiry lifecycle for `ntf/.../runs/` data consistent with your retention requirements. Workers and coordinator need read access to the selected manifest/shards and write/read access to the unique run prefix; scope the role to the bucket/prefix.
+2. Configure GitHub OIDC trust for the repository/workflow and store the role ARN as the repository secret `AWS_ROLE_TO_ASSUME`. No static AWS access keys are used by this workflow. Grant only the minimum S3 actions for the dataset prefix and run prefix.
+3. Provision 19 compatible GPU-capable workers with enough RAM/VRAM, disk, outbound S3 access, Python 3.12, and a driver compatible with pinned PyTorch 2.7.1. Self-hosted labels must be selectable in `worker_runner_json`. The initializer/coordinator runner needs S3 and GitHub Actions read access; GPU is usually unnecessary there.
+4. Open **Actions → NTF production-oriented FedAvg (manual) → Run workflow**. Supply `rounds`, `local_steps`, runner-label JSON arrays, bucket, region, run prefix, and the immutable dataset `manifest_key`. The workflow does not start unless manually dispatched.
+5. On success, inspect `final.json` and the final checkpoint at the run prefix in S3. Run a separate evaluation and provenance review before considering a model usable. No quality gate or model publication is implied by successful aggregation.
+
+The reference bucket must be the same for the manifest and the run artifacts because the workflow assumes one AWS role. Do not upload credentials, raw private text, or checkpoints to public artifacts. Configure an S3 lifecycle and access log policy; checkpoints may be large and stored once per round plus per-shard update.
+
+## Tests (no training)
+
+Tests use only tiny synthetic tensors and temporary JSONL fixtures; they do not launch the trainer or GitHub workflow.
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-You can also run the demo end-to-end locally without GitHub:
+They cover exact 19-shard manifest coverage, duplicate-record rejection, deterministic config fingerprints, weighted FedAvg math, incompatible state keys/shapes/dtypes, missing/duplicate updates, non-finite values, failed Actions workers, and immutable local checkpoint storage. No model training was run as part of preparing this release candidate.
 
-```bash
-rm -rf /tmp/ntf-demo && mkdir -p /tmp/ntf-demo/artifacts
-for shard in $(seq -w 0 18); do
-  python3 scripts/demo_worker.py --shard "$shard" --shards 19 --output-dir "/tmp/ntf-demo/artifacts/ntf-shard-$shard"
-done
-python3 scripts/reduce.py --input-dir /tmp/ntf-demo/artifacts --expected-shards 19 --output /tmp/ntf-demo/summary.json
-cat /tmp/ntf-demo/summary.json
+## Repository map
+
+```text
+.github/workflows/ntf.yml          manual 19-worker iterative FedAvg workflow
+training/fedavg/config.json        shared model/training configuration
+training/fedavg/model.py           shared byte-level causal Transformer
+training/fedavg/requirements.txt   pinned PyTorch and boto3 dependencies
+scripts/prepare_shards.py          deterministic disjoint-data manifest builder
+scripts/fedavg_init.py             common round-0 checkpoint initializer
+scripts/fedavg_worker.py           shard-local rounds and immutable updates
+scripts/fedavg_coordinator.py      fail-fast barriers and sample-weighted reducer
+scripts/fedavg_core.py             strict validation and FedAvg implementation
+scripts/fedavg_storage.py          isolated-run S3/local storage adapters
+docs/adapting.md                   operational checklist and rollout boundary
+RELEASE_NOTES_v2.0.0.md            proposed public release payload (not published)
+tests/                             synthetic/offline tests; no training
 ```
 
 ## References
 
+- [GitHub-hosted runner hardware and runner types](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 - [GitHub Actions limits and concurrency](https://docs.github.com/en/actions/reference/limits)
-- [GitHub-hosted runner hardware](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 - [Matrix jobs and `max-parallel`](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/running-variations-of-jobs-in-a-workflow)
-- [Store and share workflow artifacts](https://docs.github.com/en/actions/tutorials/store-and-share-data)
-- [REST API: list jobs for a workflow run](https://docs.github.com/en/rest/actions/workflow-jobs)
+- [GitHub OIDC in AWS](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services)
+- [PyTorch reproducibility notes](https://pytorch.org/docs/stable/notes/randomness.html)
+- [PyTorch distributed training](https://pytorch.org/tutorials/beginner/dist_overview.html)
 
 ## License
 
