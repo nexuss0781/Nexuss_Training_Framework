@@ -1,0 +1,38 @@
+{"id":"r01","text":"Nexus begins with stable shard assignment and honest accounting."}
+{"id":"r02","text":"Workers process independent pieces and write versioned results."}
+{"id":"r03","text":"A coordinator watches job states then collects artifacts."}
+{"id":"r04","text":"Reducers combine results only when the operation is well defined."}
+{"id":"r05","text":"Machine learning checkpoints need compatible tensors and valid protocols."}
+{"id":"r06","text":"GitHub Actions runners are temporary isolated computers."}
+{"id":"r07","text":"Large data belongs in suitable storage not copied without a plan."}
+{"id":"r08","text":"A shard manifest can balance records by bytes or estimated work."}
+{"id":"r09","text":"Failure handling keeps all independent workers observable."}
+{"id":"r10","text":"Reproducible inputs make outputs easier to verify."}
+{"id":"r11","text":"Parallelism helps independent tasks but adds coordination overhead."}
+{"id":"r12","text":"Artifacts carry worker outputs across isolated job boundaries."}
+{"id":"r13","text":"A model merge must follow its training algorithm assumptions."}
+{"id":"r14","text":"Frontier model training needs specialized compute and communication."}
+{"id":"r15","text":"Evaluation and preprocessing can be sensible parallel workloads."}
+{"id":"r16","text":"Retries require idempotent work and unique artifact naming."}
+{"id":"r17","text":"A useful framework separates orchestration from project logic."}
+{"id":"r18","text":"Validate missing duplicates and malformed worker results."}
+{"id":"r19","text":"Keep secrets out of logs artifacts and pull request code."}
+{"id":"r20","text":"Measured limits vary by plan runner image and account usage."}
+{"id":"r21","text":"One coordinator provides a single place for monitoring and reduction."}
+{"id":"r22","text":"Nineteen shards divide this small example by record index."}
+{"id":"r23","text":"Production datasets should be partitioned before download."}
+{"id":"r24","text":"This demo sums token frequencies rather than model parameters."}
+{"id":"r25","text":"Check logs and outputs before trusting a workflow result."}
+{"id":"r26","text":"Every work item should be assigned according to the chosen contract."}
+{"id":"r27","text":"A reusable template still needs project-specific tests."}
+{"id":"r28","text":"Run duration and available concurrency are not guaranteed reservations."}
+{"id":"r29","text":"Use explicit resource and billing budgets."}
+{"id":"r30","text":"Nexus Training Framework is a starter for fan out and fan in."}
+{"id":"r31","text":"Stable schemas make it simpler to evolve worker outputs."}
+{"id":"r32","text":"Independent candidates can be compared by a project specific evaluator."}
+{"id":"r33","text":"Avoid assuming independently trained models can be averaged."}
+{"id":"r34","text":"The coordinator checks completion then aggregates verified artifacts."}
+{"id":"r35","text":"An external object store can serve shard specific data partitions."}
+{"id":"r36","text":"Actions matrices cap parallel execution without reserving runners."}
+{"id":"r37","text":"A reproducible manifest records provenance and input identity."}
+{"id":"r38","text":"Start with a toy run then scale only after measuring costs."}

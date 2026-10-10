@@ -1,0 +1,95 @@
+name: NTF 19-worker demo
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  worker:
+    name: NTF worker shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 19
+      matrix:
+        shard: ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Process this shard
+        run: >-
+          python scripts/demo_worker.py
+          --shard "${{ matrix.shard }}"
+          --shards 19
+          --input data/demo.jsonl
+          --output-dir "out/shard-${{ matrix.shard }}"
+
+      - name: Upload this shard result
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntf-shard-${{ matrix.shard }}
+          path: out/shard-${{ matrix.shard }}/result.json
+          if-no-files-found: error
+          retention-days: 1
+
+  coordinator:
+    name: NTF coordinator / live monitor + reducer
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Monitor all 19 worker jobs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: >-
+          python scripts/monitor.py
+          --expected-shards 19
+          --poll-seconds 60
+          --timeout-seconds 20400
+
+      - name: Download worker artifacts
+        if: success()
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Reduce worker results
+        if: success()
+        run: >-
+          python scripts/reduce.py
+          --input-dir artifacts
+          --expected-shards 19
+          --output out/aggregate/summary.json
+
+      - name: Upload combined result
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntf-final-report
+          path: out/aggregate/summary.json
+          if-no-files-found: error
+          retention-days: 7

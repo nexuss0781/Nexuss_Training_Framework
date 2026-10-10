@@ -1,0 +1,9 @@
+{
+  "name": "Nexus Training Framework",
+  "version": "0.1.0",
+  "pattern": "fan-out/fan-in",
+  "workers": 19,
+  "coordinators": 1,
+  "worker_job_name_prefix": "NTF worker shard ",
+  "example": "jsonl-round-robin-word-count"
+}
