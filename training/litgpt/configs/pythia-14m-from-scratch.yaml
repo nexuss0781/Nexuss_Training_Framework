@@ -1,0 +1,36 @@
+# Small, single-device smoke configuration. Increase tokens and tune batch/sequence
+# settings for a real corpus and the available accelerator before substantive runs.
+model_name: pythia-14m
+model_config: null
+out_dir: training/litgpt/out/pythia-14m
+precision: 32-true
+# No pretrained weights: LitGPT initializes this architecture from scratch.
+initial_checkpoint_dir: null
+resume: false
+data: TextFiles
+train:
+  save_interval: 100
+  log_interval: 1
+  global_batch_size: 1
+  micro_batch_size: 1
+  lr_warmup_steps: 1
+  max_tokens: 256
+  max_seq_length: 128
+  max_norm: 1.0
+  min_lr: 0.00006
+eval:
+  interval: 1000
+  max_iters: 1
+  initial_validation: false
+  final_validation: false
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 0.0003
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+devices: 1
+num_nodes: 1
+tokenizer_dir: checkpoints/EleutherAI/pythia-14m
+logger_name: csv
+seed: 42

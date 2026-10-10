@@ -48,6 +48,12 @@ The included reducer merges **word-count maps**, not model weights. Two independ
 
 Treat this repository as a **general-purpose embarrassingly-parallel workflow scaffold**. For ML, use it only for work that is truly shardable (for example, preprocessing, evaluation, hyperparameter trials, or explicitly designed federated rounds) and implement/review the model-specific protocol separately. Do not publish or deploy aggregated weights without validating quality and provenance.
 
+## LitGPT from-scratch training scaffold
+
+The [`training/litgpt/`](training/litgpt/) subtree is an optional, explicitly invoked trainer based on [Lightning AI LitGPT](https://github.com/Lightning-AI/litgpt) (Apache-2.0). It uses the Pythia-14M architecture with randomly initialized weights and a tokenizer-only download; its checked-in data and 256-token budget are a tiny smoke example, not a useful language model. Read its setup and data guidance before starting a real run.
+
+This trainer is **not** wired into GitHub Actions. The 19 independent matrix workers do not exchange synchronized gradients and cannot substitute for DDP/FSDP or a coordinated multi-node training system. Standard GitHub-hosted runners are resource/plan-limited; GPU/larger runners are separate, concurrency may queue, and each hosted job has a six-hour cap. See the [LitGPT trainer notes](training/litgpt/README.md) before choosing an actual training platform.
+
 ## GitHub Actions realities
 
 These figures are not a promise of identical resources for every account or runner image:

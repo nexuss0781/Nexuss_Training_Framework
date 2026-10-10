@@ -4,3 +4,9 @@ __pycache__/
 venv/
 out/
 artifacts/
+
+# LitGPT checkpoints, private corpora, and generated token caches
+checkpoints/
+training/litgpt/data/private/
+training/litgpt/data/sample_text/train/
+training/litgpt/data/sample_text/val/
